@@ -192,7 +192,10 @@ list_peers(){
             ;;
         esac
     done
-    #Format [NAME] PK -> IP
+    if [ -z "$pk" ]
+    then
+        echo "No peers available"
+    fi
 }
 fn_handler(){
     case $action in
