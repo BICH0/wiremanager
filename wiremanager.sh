@@ -95,7 +95,7 @@ fetch_ip(){
     for ip in $ips
     do
         local ip_blocks=($(echo $ip | sed 's/\./ /g'))
-        incremented=$(increment_ip $mask "${lastip[@]}")
+        incremented=$(increment_ip $ "${lastip[@]}")
         if [[ ! "${ip_blocks[@]}" == "${incremented[@]}" ]]
         then
             if [ -z $(echo "$ips" | grep "${incremented[@]// /.}") ]
@@ -111,9 +111,9 @@ fetch_ip(){
     done
     if [ -z "$res" ]
     then
-        res=$(increment_ip $mask "${lastip[@]}")
+        res=$(increment_ip $ "${lastip[@]}")
     fi
-    echo ${res[@]// /.}/${mask}
+    echo ${res[@]// /.}"/32"
 }
 fetch_peer(){
     local peer=$1
