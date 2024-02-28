@@ -1,12 +1,32 @@
 #!/bin/bash
 ##Yet another wireguard manager written in pure bash
-ip_net="10.0.0.0"
-port=51820
 host="confugiradores.es"
-####
-endpoint=${host}:${port}
+#-----
+##Colors
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+NC='\e[0;m'
+#------
+get_value(){
+ local value=$(grep "$1" $cfile | awk '{print $3}')
+ if [ -z "$value" ] && [ $2 -eq 1 ]
+ then
+    echo -e "${RED}[ERROR]${NC} No $1 in the config file ${cfile}, verify that the file is correct"
+    exit 1
+ else
+    echo $value
+ fi
+}
+handle_output(){
+    if [ $1 -eq 0 ]
+    then
+        echo -e "${GREEN}[OK]${NC}"
+    else
+        echo -e "${RED}[ERROR]${NC}"
+    fi
+}
 clear_file(){
-    echo "Cleaning file"
     > ${cfile}.tmp
     local empty=0
     while read -r line
@@ -68,11 +88,9 @@ increment_ip(){
     echo ${ip[@]}
 }
 fetch_ip(){
-    local ips_mask="$(grep "AllowedIPs" $cfile | awk '{print $3}')"
-    local ips="$(echo "$ips_mask" | cut -f1 -d'/' | sort -t . -k 3,3n -k 4,4n)"
-    local mask=$(echo "$ips_mask" | head -1 | cut -f2 -d"/")
-    unset ips_mask
-    local lastip=($(echo $ips | cut -f1 -d" " | sed 's/\./ /g'))
+    local ips="$(grep "AllowedIPs" $cfile | awk '{print $3}' | cut -f1 -d'/' | sort -t . -k 3,3n -k 4,4n))"
+    local mask=$(echo "$ip_net" | cut -f2 -d"/")
+    local lastip=($(echo $ip_net | cut -f1 -d'/' | sed 's/\./ /g'))
     lastip[3]=1
     for ip in $ips
     do
@@ -96,7 +114,6 @@ fetch_ip(){
         res=$(increment_ip $mask "${lastip[@]}")
     fi
     echo ${res[@]// /.}/${mask}
-    return
 }
 fetch_peer(){
     local peer=$1
@@ -110,7 +127,7 @@ fetch_peer(){
     else
         if [ -f $cfile".names" ]
         then
-            res=$(grep $peer $cfile".names" | cut -f1 -d":")
+            res=$(grep ${peer,,} $cfile".names" | cut -f1 -d":")
         fi
     fi
     if [ -z "$(echo "$peers" | grep "PublicKey = $res")" ]
@@ -122,7 +139,7 @@ fetch_peer(){
 verify_file(){
     if [ $(wc -l $1.tmp | cut -f1 -d" ") -eq 0 ]
     then
-        echo "An error ocurred while deleting user, aborting"
+        echo -e "${RED}[ERROR]${NC} An error ocurred while deleting user, aborting"
         rm $1.tmp
         exit 1
     else
@@ -185,13 +202,18 @@ fn_handler(){
             local publickey=$(echo $privatekey | wg pubkey)
             local ip=$(fetch_ip)
             local name=$val
+            if [[ ! $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(\/[0-9]{1,2})?$ ]]
+            then
+                echo "[ERROR] An error ocurred while fetching an available IP verify that all the ips on $cfile are valid"
+                exit 1
+            fi
             if [ -z "$name" ]
             then
                 name="Peer"
             else
                 if [ ! -f "${cfile}.names" ]
                 then
-                    echo "[INFO] Creating pretty names file"
+                    echo -e "${YELLOW}[INFO]${NC} Creating pretty names file"
                 fi
                 if [ -n "$(grep "$name" $cfile.names)" ]
                 then
@@ -202,28 +224,54 @@ fn_handler(){
                     done
                     name=$name.$num
                 fi
-                echo $publickey:$name >> $cfile.names
+                echo $publickey:${name,,} >> $cfile.names
             fi
-            local peer="[Peer]\nPublicKey = $publickey\nAllowedIPs = $ip"
+            local psk=""
+            local psk_configured="No"
+            while [[ ! ${psk,,} =~ ^y|n$ ]]
+            do
+                echo -n "Do you want to generate a preshared key? Y/n: "
+                read -r psk
+                if [ -z "$psk" ]
+                then
+                    psk="y"
+                fi
+            done
+            if [ $psk == "y" ]
+            then
+                psk_configured="Yes"
+                psk="\nPresharedKey = $(wg genpsk)"
+            else
+                psk=""
+            fi
+            local peer="[Peer]\nPublicKey = $publickey\nAllowedIPs = ${ip}${psk}"
             echo -e "\n$peer">>$cfile
-            echo -e "Created client [$name]:\n   IP: $ip\n   PK: $privatekey\n   PUB: $publickey\n------------------------------------------------------"
+            echo -e "\nCreated client [$name]:\n   IP: $ip    PSK: $psk_configured\n   PK: $privatekey\n   PUB: $publickey\n------------------------------------------------------\n"
             while [[ ! ${qr,,} =~ ^q|f$ ]]
             do
                 echo -n "Do you want to generate (Q)rCode or (F)ile: "
                 read -r qr
 
             done
-            clear
-            local client="[Interface]\nAddress = $ip\nListenPort = $port\nPrivateKey = $privatekey\n\n[Peer]\nPublicKey = $publickey\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = $endpoint"
+            local client="[Interface]\nAddress = $ip\nListenPort = $port\nPrivateKey = $privatekey\n\n[Peer]\nPublicKey = $publickey${psk}\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = $endpoint"
             case ${qr,,} in
                 "q")
                     echo -e "$client" | qrencode -s 1 -t ANSIUTF8
+                    if [ $? -eq 0 ]
+                    then
+                        return
+                    fi
+                    echo -e "${RED}[ERROR]${NC} An error ocurred while generating the QRCode, check the error above"
                 ;;
                 "f")
-                    echo -e "$client" > ${name}_client.wg
-                    echo "Client stored in $(pwd)/${name}_client.wg"
+
+                ;;
+                *)
+                    return
                 ;;
             esac
+            echo -e "$client" > ${name}_client.wg
+            echo "Client stored in $(pwd)/${name}_client.wg"
         ;;
         "d")
             if [ -z $val ]
@@ -231,15 +279,15 @@ fn_handler(){
                 echo "You need to choose a name, ip or public key to delete that peer"
                 exit 1
             fi
-            echo "Fetching peer..."
             local peer=$(fetch_peer $val)
             if [ -z "$peer" ]
             then
-                echo "[ERROR] Peer not found"
+                echo -e "${RED}[ERROR]${NC} Peer not found"
                 exit 1
             fi
-            echo "Removing peer [ $peer ]..."
+            echo -n "Removing peer [ $peer ] "
             remove_peer $peer
+            handle_output $?
         ;;
         "l")
             list_peers
@@ -288,9 +336,27 @@ main(){
             ;;
         esac
     done
-    clear_file
-    if [ -n $action ]
+    if [ ! -w $cfile ]
     then
+        echo -e "[ERROR] Config file $cfile is not writable or doesn't exist"
+        exit 1
+    fi
+    if [ -n "$action" ]
+    then
+        clear_file
+        port=$(get_value "ListenPort" 1)
+        ip_net=$(get_value "Address" 1)
+        if ! wg -h &>/dev/null
+        then
+            echo -e "${RED}[ERROR]${NC} Wireguard not installed or not found"
+            exit 1
+        fi
+        if [[ ! $ip_net =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}\/[0-9]{1,2}$ ]]
+        then
+            echo -e "${RED}[ERROR]${NC} Invalid IP $ip_net in config file $cfile"
+            exit 1
+        fi
+        endpoint=${host}:${port}
         fn_handler
     else    
         help
