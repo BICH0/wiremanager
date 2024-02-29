@@ -95,7 +95,7 @@ fetch_ip(){
     for ip in $ips
     do
         local ip_blocks=($(echo $ip | sed 's/\./ /g'))
-        incremented=$(increment_ip $ "${lastip[@]}")
+        incremented=$(increment_ip $mask "${lastip[@]}")
         if [[ ! "${ip_blocks[@]}" == "${incremented[@]}" ]]
         then
             if [ -z $(echo "$ips" | grep "${incremented[@]// /.}") ]
@@ -111,7 +111,7 @@ fetch_ip(){
     done
     if [ -z "$res" ]
     then
-        res=$(increment_ip $ "${lastip[@]}")
+        res=$(increment_ip $mask "${lastip[@]}")
     fi
     echo ${res[@]// /.}"/32"
 }
@@ -161,7 +161,8 @@ list_peers(){
     local pk=""
     local sk=""
     local ips=""
-    echo -e "$(grep -A3 "\[Peer\]" $cfile)\n[Peer]" | while read -r line
+    local lines="$(grep -A3 "\[Peer\]" $cfile)\n[Peer]"
+    echo -e "$lines" | while read -r line
     do
         title=$(echo $line | cut -f1 -d" ")
         value=$(echo $line | cut -f3 -d" ")
@@ -169,7 +170,7 @@ list_peers(){
             "[Peer]")
                 if [ -n "$pk" ]
                 then
-                    echo -e "\n${name^}: ${pk}\n   AllowedIPs: ${ips}${sk}"
+                    echo -e "\n  ${name^}: ${pk}\n    AllowedIPs: ${ips}${sk}"
                     unset name pk sk ips
                 fi
             ;;
@@ -185,14 +186,15 @@ list_peers(){
                 fi
             ;;
             "PresharedKey")
-                sk="\n   Preshared Key: ${value}"
+                sk="\n    Preshared Key: Yes"
             ;;
             "AllowedIPs")
                 ips=$value
             ;;
         esac
     done
-    if [ -z "$pk" ]
+    echo ""
+    if [ -z "$lines" ]
     then
         echo "No peers available"
     fi
@@ -256,7 +258,7 @@ fn_handler(){
                 read -r qr
 
             done
-            local client="[Interface]\nAddress = $ip\nListenPort = $port\nPrivateKey = $privatekey\n\n[Peer]\nPublicKey = $publickey${psk}\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = $endpoint"
+            local client="[Interface]\nAddress = $ip\nListenPort = $port\nPrivateKey = $privatekey\n\n[Peer]\nPublicKey = $sv_pub${psk}\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = $endpoint"
             case ${qr,,} in
                 "q")
                     echo -e "$client" | qrencode -s 1 -t ANSIUTF8
@@ -349,6 +351,16 @@ main(){
         clear_file
         port=$(get_value "ListenPort" 1)
         ip_net=$(get_value "Address" 1)
+        iface=$(echo ${cfile##*/} | cut -f1 -d.)
+        sv_pub=$(cat $cfile.pub 2>/dev/null)
+        if [ -z "$sv_pub" ]
+        then
+            echo -e "${RED}[ERROR]${NC} Public key not found, expected $cfile.pub and its empty or non existant"
+        fi
+        if ! ip a | grep ": $iface: " &>/dev/null
+        then
+            echo -e "${RED}[ERROR]${NC} Service not available or invalid interface $cfile"
+        fi
         if ! wg -h &>/dev/null
         then
             echo -e "${RED}[ERROR]${NC} Wireguard not installed or not found"
