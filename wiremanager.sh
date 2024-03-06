@@ -1,4 +1,4 @@
-#!/bin/bash
+ #!/bin/bash
 ##Yet another wireguard manager written in pure bash
 host="confugiradores.es"
 #-----
@@ -60,7 +60,7 @@ help(){
         -d, --delete: Delete a peer by address, or public key
         -l, --list: List all peers
     '''
-} 
+}
 increment_ip(){
     local mask=$1
     shift
@@ -373,8 +373,9 @@ main(){
         fi
         endpoint=${host}:${port}
         fn_handler
-    else    
+    else
         help
     fi
 }
 main $@
+
