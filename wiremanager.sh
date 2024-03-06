@@ -1,4 +1,4 @@
- #!/bin/bash
+#!/bin/bash
 ##Yet another wireguard manager written in pure bash
 host="confugiradores.es"
 #-----
@@ -24,6 +24,15 @@ handle_output(){
         echo -e "${GREEN}[OK]${NC}"
     else
         echo -e "${RED}[ERROR]${NC}"
+    fi
+}
+handle_command(){
+    local error=$($1 1>/dev/null 2>&1)
+    if [ $? -eq 0 ] 
+    then
+        echo -e "${GREEN}[OK]${NC}"
+    else
+        echo -e "${RED}[ERROR]${NC} -> $error"
     fi
 }
 clear_file(){
@@ -52,15 +61,39 @@ clear_file(){
     mv ${cfile}.tmp $cfile
 }
 help(){
-    echo '''  Wireguard manager by BiCH0 2024
+    echo '
     Available options:
         -h, --help: Print this screen
         -c, --conf: Specify the config file, default: /etc/wireguard/wg0.conf
-        -a, --add: Add new client, peer or device, however you prefer to call it
-        -d, --delete: Delete a peer by address, or public key
-        -l, --list: List all peers
-    '''
-}
+        -a, --add, add: Add new client, peer or device, however you prefer to call it
+        -d, --delete, del, delete: Delete a peer by address, or public key
+        -l, --list, list: List all peers and report peer status
+        up: Power on wireguard interface
+        down: Power off wireguard interface by name,
+        save: Store running config to file (like shutting down wg and up again)
+    
+    Command examples:
+       Add user:
+         wiremanager [--conf <config file>] add [username]
+         wiremanage -a <user> [-c <config file>]
+         
+       Delete user:
+         wiremanager [--conf <config file>] del <username|ip|pubkey>
+         wiremanager -d <username|ip|pubkey> [-c <config file>]
+
+       List users:
+         wiremanager --list [--config <config file>]
+         
+       Change wireguard interface status:
+         wiremanager up [--conf <config file>]
+         wiremanager down [--conf <config file>]
+
+       Save running config:
+         wiremanager save [--conf <config file>]
+       
+ Wireguard manager by https://github.com/BiCH0 2024
+    '
+} 
 increment_ip(){
     local mask=$1
     shift
@@ -85,10 +118,14 @@ increment_ip(){
             break
         fi
     done
-    echo ${ip[@]}
+    echo "${ip[@]}"
 }
 fetch_ip(){
-    local ips="$(grep "AllowedIPs" $cfile | awk '{print $3}' | cut -f1 -d'/' | sort -t . -k 3,3n -k 4,4n))"
+    local ips="$(grep "AllowedIPs" $cfile | awk '{print $3}' | cut -f1 -d'/' | sort -t . -k 3,3n -k 4,4n)"
+    if [ $wg_on -eq 0 ]
+    then
+        ips="$(wg show $iface | grep "allowed ips:" | cut -f2 -d: | cut -f1 -d'/' | sed 's/\ //g')"
+    fi
     local mask=$(echo "$ip_net" | cut -f2 -d"/")
     local lastip=($(echo $ip_net | cut -f1 -d'/' | sed 's/\./ /g'))
     lastip[3]=1
@@ -113,14 +150,19 @@ fetch_ip(){
     then
         res=$(increment_ip $mask "${lastip[@]}")
     fi
-    echo ${res[@]// /.}"/32"
+    echo "${res[@]// /.}/32"
 }
 fetch_peer(){
     local peer=$1
     local peers="$(grep "\[Peer\]" -A6 $cfile)"
     if [[ "$peer" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(\/[0-9]{1,2})?$ ]]
     then
-        res=$(echo "$peers" | grep "$peer" -B2 -A2 | grep "PublicKey" | awk '{print $3}')
+        if [ $wg_on -eq 0 ]
+        then
+            res=$(wg show $iface | grep -B3 $peer | grep peer | awk '{print $2}')
+        else
+            res=$(echo "$peers" | grep "$peer" -B2 -A2 | grep "PublicKey" | awk '{print $3}')
+        fi
     elif [[ ${peer: -1} == "=" ]]
     then
         res=$peer
@@ -130,14 +172,14 @@ fetch_peer(){
             res=$(grep ${peer,,} $cfile".names" | cut -f1 -d":")
         fi
     fi
-    if [ -z "$(echo "$peers" | grep "PublicKey = $res")" ]
+    if [ -z "$(echo "$peers" | grep "PublicKey = $res")" ] && ! wg show $iface | grep "peer: $res" &>/dev/null
     then
         return
     fi
     echo $res
 }
 verify_file(){
-    if [ $(wc -l $1.tmp | cut -f1 -d" ") -eq 0 ]
+    if [ $(wc -l $1.tmp | cut -f1 -d" ") -eq 0 ] && [ "$2" -eq 1 ]
     then
         echo -e "${RED}[ERROR]${NC} An error ocurred while deleting user, aborting"
         rm $1.tmp
@@ -148,21 +190,64 @@ verify_file(){
 }
 remove_peer(){
     local peer=$1
-    cat $cfile | grep -n "PublicKey = $1" -B1 -A2 | sed -n 's/^\([0-9]\{1,\}\).*/\1d/p' | sed -f - $cfile > $cfile.tmp
-    verify_file $cfile
+    if [ $wg_on -eq 0 ]
+    then
+        wg set $iface peer $peer remove
+    else
+        cat $cfile | grep -n "PublicKey = $1" -B1 -A2 | sed -n 's/^\([0-9]\{1,\}\).*/\1d/p' | sed -f - $cfile > $cfile.tmp
+        verify_file $cfile
+    fi
     if [ -f ${cfile}.names ]
     then
         cat $cfile.names | grep -v "$1:" > $cfile.names.tmp
-        verify_file $cfile.names
+        verify_file $cfile.names 1
     fi
+    rm "${cfile%/*}/psk/$(echo $peer | sed 's/[^a-zA-Z0-9]//g').psk"
 }
 list_peers(){
-    local name=""
+    local lines=""
     local pk=""
+    if [ $wg_on -eq 0 ]
+    then
+        echo ""
+        lines="$(wg show $iface | grep peer: -A4)"
+        echo "$lines" | while read -r line
+        do
+            if [[ "$line" =~ ^peer: ]]
+            then
+                pk=$(echo $line | cut -f2 -d":" | sed 's/\ //g')
+                name=$(grep "$pk" $cfile.names | cut -f2 -d":")
+                if [ -z $name ]
+                then
+                    name="peer"
+                fi
+                echo -e "  ${YELLOW}${name^}: $pk${NC}"
+            elif [[ "$line" =~ ^allowed\ ips: ]]
+            then
+                echo "     allowed ips:"
+                for ip in "$(echo $line | cut -f2 -d":" | sed 's/\ //g' | sed 's/,/ /g')"
+                do
+                    ip=$(echo $ip | cut -f1 -d"/")
+                    echo -n "       $ip "
+                    if ping -c2 -W2 $ip &>/dev/null
+                    then
+                        echo -e "${GREEN}[ON]${NC}"
+                    else
+                        echo -e "${RED}[OFF]${NC}"
+                    fi
+                done
+            else
+                echo "     $line"
+            fi
+        done
+        echo ""
+        return
+    fi
+    local name=""
     local sk=""
     local ips=""
-    local lines="$(grep -A3 "\[Peer\]" $cfile)\n[Peer]"
-    echo -e "$lines" | while read -r line
+    lines="$(grep -A3 "\[Peer\]" $cfile)"
+    echo -e "$lines\n[Peer]" | while read -r line
     do
         title=$(echo $line | cut -f1 -d" ")
         value=$(echo $line | cut -f3 -d" ")
@@ -170,7 +255,7 @@ list_peers(){
             "[Peer]")
                 if [ -n "$pk" ]
                 then
-                    echo -e "\n  ${name^}: ${pk}\n    AllowedIPs: ${ips}${sk}"
+                    echo -e "\n  ${YELLOW}${name^}: ${pk}${NC}${sk}\n    AllowedIPs: ${ips}"
                     unset name pk sk ips
                 fi
             ;;
@@ -186,7 +271,7 @@ list_peers(){
                 fi
             ;;
             "PresharedKey")
-                sk="\n    Preshared Key: Yes"
+                sk="\n    Preshared Key: (hidden)"
             ;;
             "AllowedIPs")
                 ips=$value
@@ -196,7 +281,7 @@ list_peers(){
     echo ""
     if [ -z "$lines" ]
     then
-        echo "No peers available"
+        echo -e "No peers available\n"
     fi
 }
 fn_handler(){
@@ -209,7 +294,7 @@ fn_handler(){
             local name=$val
             if [[ ! $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(\/[0-9]{1,2})?$ ]]
             then
-                echo "[ERROR] An error ocurred while fetching an available IP verify that all the ips on $cfile are valid"
+                echo -e "${RED}[ERROR]${NC} An error ocurred while fetching an available IP verify that all the ips on $cfile are valid"
                 exit 1
             fi
             if [ -z "$name" ]
@@ -219,6 +304,7 @@ fn_handler(){
                 if [ ! -f "${cfile}.names" ]
                 then
                     echo -e "${YELLOW}[INFO]${NC} Creating pretty names file"
+                    touch "$cfile.names"
                 fi
                 if [ -n "$(grep "$name" $cfile.names)" ]
                 then
@@ -244,17 +330,32 @@ fn_handler(){
             done
             if [ $psk == "y" ]
             then
+                local psk_path="${cfile%/*}/psk/"
+                if [ ! -d $psk_path ]
+                then
+                    mkdir $psk_path || exit 1
+                fi
+                psk_path="${psk_path}$(echo $publickey | sed 's/[^a-zA-Z0-9]//g').psk"
                 psk_configured="Yes"
-                psk="\nPresharedKey = $(wg genpsk)"
+                psk=$(wg genpsk)
+                psk_off="\nPresharedKey = $psk"
+                psk_on=" preshared-key $psk_path"
             else
                 psk=""
             fi
-            local peer="[Peer]\nPublicKey = $publickey\nAllowedIPs = ${ip}${psk}"
-            echo -e "\n$peer">>$cfile
+            if [ $wg_on -eq 0 ]
+            then
+                echo $psk > $psk_path
+                wg set ${iface} peer ${publickey} allowed-ips ${ip}${psk_on}
+            else
+                local peer="[Peer]\nPublicKey = $publickey\nAllowedIPs = ${ip}${psk_off}"
+                echo -e "\n$peer">>$cfile
+            fi
+            psk="\nPresharedKey = ${psk}"
             echo -e "\nCreated client [$name]:\n   IP: $ip    PSK: $psk_configured\n   PK: $privatekey\n   PUB: $publickey\n------------------------------------------------------\n"
-            while [[ ! ${qr,,} =~ ^q|f$ ]]
+            while [[ ! ${qr,,} =~ ^q|f|p|n$ ]]
             do
-                echo -n "Do you want to generate (Q)rCode or (F)ile: "
+                echo -n "Do you want to generate (Q)rCode (F)ile (P)rint or (N)one: "
                 read -r qr
 
             done
@@ -269,7 +370,10 @@ fn_handler(){
                     echo -e "${RED}[ERROR]${NC} An error ocurred while generating the QRCode, check the error above"
                 ;;
                 "f")
-
+                    :
+                ;;
+                "p")
+                    echo -e "$client"
                 ;;
                 *)
                     return
@@ -297,6 +401,24 @@ fn_handler(){
         "l")
             list_peers
         ;;
+        "up")
+            echo ""
+            echo -n "Setting up wireguard interface $iface "
+            handle_command "wg-quick up $iface"
+            echo ""
+        ;;
+        "down")
+            echo ""
+            echo -n "Setting down wireguard interface $iface "
+            handle_command "wg-quick down $iface"
+            echo ""
+        ;;
+        "save")
+            echo ""
+            echo -n "Saving active config on $iface "
+            handle_command "wg-quick save $iface"
+            echo ""
+        ;;
     esac
 }
 main(){
@@ -320,22 +442,37 @@ main(){
             ;;
             "-a"|"--add"|"add"|\
             "-d"|"--delete"|"del"|"delete"|\
-            "-l"|"--list"|"list")
+            "-l"|"--list"|"list"|\
+            "up"|"down"|"save")
                 if [ -z "$action" ]
                 then
+                    if [ $1 == "up" ] || [ $1 == "down" ] || [ $1 == "save" ]
+                    then
+                        action=$1
+                        shift
+                        continue
+                    fi
                     action=$(echo "$1" | tr -d "-" | cut -c1)
                     shift
                     if [[ ! "$1" =~ ^- ]]
                     then
                         val="$1"
                         shift
+                    else
+                      echo -e "${RED}[ERROR]${NC} Invalid command, use 'wiremanager [--config file] <action> [value]' or wiremanager -h"
+                      exit 1
                     fi
                 else
-                    echo "Invalid command, use 'wiremanager [--config file] <action> [value]'"
+                    echo -e "${RED}[ERROR]${NC} Invalid command, use 'wiremanager [--config file] <action> [value]'"
                     exit 1
                 fi
             ;;
+            "-h"|"--help"|"help")
+                help
+                exit 0
+            ;;
             *)
+                echo -e "${RED}[ERROR]${NC} Invalid argument $1\n"
                 help
                 exit 0
             ;;
@@ -343,7 +480,7 @@ main(){
     done
     if [ ! -w $cfile ]
     then
-        echo -e "[ERROR] Config file $cfile is not writable or doesn't exist"
+        echo -e "${RED}[ERROR]${NC} Config file $cfile is not writable or doesn't exist"
         exit 1
     fi
     if [ -n "$action" ]
@@ -353,13 +490,15 @@ main(){
         ip_net=$(get_value "Address" 1)
         iface=$(echo ${cfile##*/} | cut -f1 -d.)
         sv_pub=$(cat $cfile.pub 2>/dev/null)
+        wg_on=0
         if [ -z "$sv_pub" ]
         then
             echo -e "${RED}[ERROR]${NC} Public key not found, expected $cfile.pub and its empty or non existant"
+            exit
         fi
         if ! ip a | grep ": $iface: " &>/dev/null
         then
-            echo -e "${RED}[ERROR]${NC} Service not available or invalid interface $cfile"
+            wg_on=1
         fi
         if ! wg -h &>/dev/null
         then
@@ -373,9 +512,8 @@ main(){
         fi
         endpoint=${host}:${port}
         fn_handler
-    else
+    else    
         help
     fi
 }
-main $@
-
+main "$@"
