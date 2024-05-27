@@ -1,6 +1,6 @@
 #!/bin/bash
 ##Yet another wireguard manager written in pure bash
-host="confugiradores.es"
+host="<yourdomain/ip>"
 #-----
 ##Colors
 RED='\e[0;31m'
