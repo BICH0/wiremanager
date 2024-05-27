@@ -28,7 +28,7 @@ handle_output(){
 }
 handle_command(){
     local error=$($1 1>/dev/null 2>&1)
-    if [ $? -eq 0 ] 
+    if [ $? -eq 0 ]
     then
         echo -e "${GREEN}[OK]${NC}"
     else
@@ -71,29 +71,29 @@ help(){
         up: Power on wireguard interface
         down: Power off wireguard interface by name,
         save: Store running config to file (like shutting down wg and up again)
-    
+
     Command examples:
        Add user:
          wiremanager [--conf <config file>] add [username]
          wiremanage -a <user> [-c <config file>]
-         
+
        Delete user:
          wiremanager [--conf <config file>] del <username|ip|pubkey>
          wiremanager -d <username|ip|pubkey> [-c <config file>]
 
        List users:
          wiremanager --list [--config <config file>]
-         
+
        Change wireguard interface status:
          wiremanager up [--conf <config file>]
          wiremanager down [--conf <config file>]
 
        Save running config:
          wiremanager save [--conf <config file>]
-       
- Wireguard manager by https://github.com/BiCH0 2024
+
+       Wireguard manager by BiCH0 2024
     '
-} 
+}
 increment_ip(){
     local mask=$1
     shift
@@ -207,9 +207,10 @@ remove_peer(){
 list_peers(){
     local lines=""
     local pk=""
+    echo -n "Interface status: "
     if [ $wg_on -eq 0 ]
     then
-        echo ""
+        echo -e "${GREEN}[UP]${NC}\n"
         lines="$(wg show $iface | grep peer: -A4)"
         echo "$lines" | while read -r line
         do
@@ -242,6 +243,8 @@ list_peers(){
         done
         echo ""
         return
+    else
+	echo -e "${RED}[DOWN]${NC}"
     fi
     local name=""
     local sk=""
@@ -343,11 +346,14 @@ fn_handler(){
             else
                 psk=""
             fi
+	    echo -en "Wireguard interface $(echo ${cfile##*/} | cut -f1 -d'.') "
             if [ $wg_on -eq 0 ]
             then
+		echo -e "${GREEN}[ON]${NC}"
                 echo $psk > $psk_path
                 wg set ${iface} peer ${publickey} allowed-ips ${ip}${psk_on}
             else
+		echo -e "${RED}[OFF]${NC}"
                 local peer="[Peer]\nPublicKey = $publickey\nAllowedIPs = ${ip}${psk_off}"
                 echo -e "\n$peer">>$cfile
             fi
@@ -405,12 +411,22 @@ fn_handler(){
             echo ""
             echo -n "Setting up wireguard interface $iface "
             handle_command "wg-quick up $iface"
+	    ip link show dev $iface &>/dev/null
+            if [ $? -ne 0 ]
+            then
+                echo -e "${RED}[ERROR]${NC} Check failed, interface still down, check wg-quick up $iface output"
+            fi
             echo ""
         ;;
         "down")
             echo ""
             echo -n "Setting down wireguard interface $iface "
             handle_command "wg-quick down $iface"
+	    ip link show dev $iface &>/dev/null
+	    if [ $? -eq 0 ]
+	    then
+		echo -e "${RED}[ERROR]${NC} Check failed, interface still up, check wg-quick down $iface output"
+	    fi
             echo ""
         ;;
         "save")
@@ -432,12 +448,19 @@ main(){
                 shift
                 if [ -f $1 ]
                 then
-                    echo "Using config file [$1]"
+                    echo -e "\nUsing config file [$1]"
                     cfile="$1"
                     shift
                 else
-                    echo "Invalid config file"
-                    exit 1
+			cfile="/etc/wireguard/$1.conf"
+			if [ -f $cfile ]
+			then
+			    echo -e "\nUsing config file [$1]"
+			    shift
+			else
+			    echo -e "\n${RED}Invalid config file${NC}"
+	                    exit 1
+			fi
                 fi
             ;;
             "-a"|"--add"|"add"|\
@@ -458,12 +481,9 @@ main(){
                     then
                         val="$1"
                         shift
-                    else
-                      echo -e "${RED}[ERROR]${NC} Invalid command, use 'wiremanager [--config file] <action> [value]' or wiremanager -h"
-                      exit 1
                     fi
                 else
-                    echo -e "${RED}[ERROR]${NC} Invalid command, use 'wiremanager [--config file] <action> [value]'"
+                    echo "Invalid command, use 'wiremanager [--config file] <action> [value]'"
                     exit 1
                 fi
             ;;
@@ -512,7 +532,7 @@ main(){
         fi
         endpoint=${host}:${port}
         fn_handler
-    else    
+    else
         help
     fi
 }
